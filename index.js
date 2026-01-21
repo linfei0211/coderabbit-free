@@ -556,36 +556,119 @@ export class HTTPError extends Error {
 /**
  * fetchJSON：默认解析 JSON；非 2xx 抛 HTTPError
  * @param {string} url
- * @param {RequestInit & { timeoutMs?: number, parse?: "json"|"text"|"raw" }} [options]
+ * @param {RequestInit & {
+ *   timeoutMs?: number,
+ *   parse?: "json"|"text"|"raw",
+ *   retries?: number,
+ *   retryDelayMs?: number,
+ *   retryOn?: number[] | ((status: number) => boolean)
+ * }} [options]
  */
 export const fetchJSON = async (url, options = {}) => {
-  const { timeoutMs = 15000, parse = "json", ...init } = options;
-  const controller = new AbortController();
-  const signal = init.signal ? init.signal : controller.signal;
+  const {
+    timeoutMs = 15000,
+    parse = "json",
+    retries = 0,
+    retryDelayMs = 300,
+    retryOn = [408, 429, 500, 502, 503, 504],
+    ...init0
+  } = options;
 
-  const timer = setTimeout(() => controller.abort(new DOMException("Request timeout", "AbortError")), timeoutMs);
-  try {
-    const res = await fetch(url, { ...init, signal });
-    const contentType = res.headers.get("content-type") || "";
+  const init = { ...init0 };
 
-    let body;
-    if (parse === "raw") body = res;
-    else if (parse === "text") body = await res.text();
-    else if (contentType.includes("application/json")) body = await res.json();
-    else body = safeJSONParse(await res.text(), null);
-
-    if (!res.ok) {
-      throw new HTTPError(`HTTP ${res.status} ${res.statusText}`, {
-        status: res.status,
-        statusText: res.statusText,
-        url: res.url || url,
-        body,
-      });
-    }
-    return body;
-  } finally {
-    clearTimeout(timer);
+  // headers：补齐 Accept；支持 body 直接传 plain object/array（自动 JSON 化）
+  const headers = new Headers(init.headers || {});
+  if (!headers.has("accept")) headers.set("accept", "application/json, text/plain, */*");
+  if (init.body != null && (isPlainObject(init.body) || isArray(init.body))) {
+    if (!headers.has("content-type")) headers.set("content-type", "application/json;charset=UTF-8");
+    init.body = safeJSONStringify(init.body, "");
   }
+  init.headers = headers;
+
+  // Abort：始终使用内部 controller，并桥接外部 signal（修复：传 init.signal 时 timeout 失效）
+  const controller = new AbortController();
+  const externalSignal = init.signal;
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort(externalSignal.reason);
+    else externalSignal.addEventListener("abort", () => controller.abort(externalSignal.reason), { once: true });
+  }
+  init.signal = controller.signal;
+
+  const shouldRetryStatus = (status) =>
+    typeof retryOn === "function" ? !!retryOn(status) : Array.isArray(retryOn) ? retryOn.includes(status) : false;
+  const backoffMs = (attempt) => retryDelayMs * Math.pow(2, attempt);
+  const timeoutReason =
+    typeof DOMException !== "undefined"
+      ? new DOMException("Request timeout", "AbortError")
+      : Object.assign(new Error("Request timeout"), { name: "AbortError" });
+
+  let lastError;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    let timer = null;
+    if (timeoutMs > 0) timer = setTimeout(() => controller.abort(timeoutReason), timeoutMs);
+    try {
+      const res = await fetch(url, init);
+      const contentType = res.headers.get("content-type") || "";
+
+      let body;
+      if (parse === "raw") {
+        body = res;
+      } else {
+        const text = await res.text();
+        if (parse === "text") {
+          body = text;
+        } else {
+          // parse === "json"
+          if (res.status === 204 || res.status === 205 || text === "") {
+            body = null;
+          } else if (contentType.includes("application/json")) {
+            try {
+              body = JSON.parse(text);
+            } catch (err) {
+              // 非 2xx：不要让 JSON 解析异常“抢走”HTTPError；保留原始文本以便排查
+              if (!res.ok) body = text;
+              else {
+                const e = new Error(`Invalid JSON response from ${res.url || url}: ${String(err?.message || err)}`);
+                e.name = "JSONParseError";
+                throw e;
+              }
+            }
+          } else {
+            body = safeJSONParse(text, null);
+          }
+        }
+      }
+
+      if (!res.ok) {
+        const httpErr = new HTTPError(`HTTP ${res.status} ${res.statusText}`, {
+          status: res.status,
+          statusText: res.statusText,
+          url: res.url || url,
+          body,
+        });
+        if (attempt < retries && shouldRetryStatus(res.status)) {
+          lastError = httpErr;
+          await sleep(backoffMs(attempt));
+          continue;
+        }
+        throw httpErr;
+      }
+      return body;
+    } catch (err) {
+      // abort/timeout：直接抛出，不重试（避免“超时后继续打点”）
+      if (err?.name === "AbortError" || controller.signal.aborted) throw err;
+      lastError = err;
+      if (attempt < retries) {
+        await sleep(backoffMs(attempt));
+        continue;
+      }
+      throw err;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  throw lastError;
 };
 
 /* ==============================
