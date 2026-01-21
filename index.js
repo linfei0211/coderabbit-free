@@ -83,22 +83,49 @@ export const formatDate = (date = new Date(), pattern = "YYYY-MM-DD HH:mm:ss") =
  * 防抖：在最后一次触发 delay 后执行
  * @param {Function} fn
  * @param {number} delay
- * @param {{leading?: boolean, trailing?: boolean}} [options]
+ * @param {{leading?: boolean, trailing?: boolean, maxWait?: number}} [options]
  */
 export const debounce = (fn, delay = 200, options = {}) => {
-  const { leading = false, trailing = true } = options;
+  const { leading = false, trailing = true, maxWait } = options;
   let timer = null;
+  let maxTimer = null;
   let lastArgs;
   let lastThis;
   let leadingCalled = false;
+  let lastResult;
 
-  const invoke = () => {
+  const clearTimers = () => {
+    if (timer) clearTimeout(timer);
+    if (maxTimer) clearTimeout(maxTimer);
     timer = null;
-    if (trailing && lastArgs) {
-      fn.apply(lastThis, lastArgs);
-      lastArgs = lastThis = null;
-    }
+    maxTimer = null;
+  };
+
+  const invokeNow = () => {
+    if (!lastArgs) return lastResult;
+    lastResult = fn.apply(lastThis, lastArgs);
+    lastArgs = lastThis = null;
     leadingCalled = false;
+    return lastResult;
+  };
+
+  const invokeTrailing = () => {
+    timer = null;
+    if (trailing) invokeNow();
+    if (maxTimer) {
+      clearTimeout(maxTimer);
+      maxTimer = null;
+    }
+  };
+
+  const invokeMaxWait = () => {
+    maxTimer = null;
+    // maxWait 主要是为 trailing 模式兜底：持续触发时也要保证执行
+    if (trailing) invokeNow();
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
   };
 
   const debounced = function (...args) {
@@ -107,20 +134,31 @@ export const debounce = (fn, delay = 200, options = {}) => {
 
     if (!timer && leading && !leadingCalled) {
       leadingCalled = true;
-      fn.apply(lastThis, lastArgs);
+      lastResult = fn.apply(lastThis, lastArgs);
       lastArgs = lastThis = null;
     }
 
     if (timer) clearTimeout(timer);
-    timer = setTimeout(invoke, delay);
+    timer = setTimeout(invokeTrailing, delay);
+
+    if (typeof maxWait === "number" && maxWait > 0 && trailing && !maxTimer) {
+      maxTimer = setTimeout(invokeMaxWait, maxWait);
+    }
   };
 
   debounced.cancel = () => {
-    if (timer) clearTimeout(timer);
-    timer = null;
+    clearTimers();
     lastArgs = lastThis = null;
     leadingCalled = false;
   };
+
+  debounced.flush = () => {
+    if (!timer && !maxTimer) return lastResult;
+    clearTimers();
+    return invokeNow();
+  };
+
+  debounced.pending = () => !!(timer || maxTimer);
 
   return debounced;
 };
@@ -137,11 +175,12 @@ export const throttle = (fn, interval = 200, options = {}) => {
   let timer = null;
   let lastArgs;
   let lastThis;
+  let lastResult;
 
   const invoke = (time) => {
     lastTime = time;
     timer = null;
-    fn.apply(lastThis, lastArgs);
+    lastResult = fn.apply(lastThis, lastArgs);
     lastArgs = lastThis = null;
   };
 
@@ -170,6 +209,16 @@ export const throttle = (fn, interval = 200, options = {}) => {
     lastTime = 0;
     lastArgs = lastThis = null;
   };
+
+  throttled.flush = () => {
+    if (!timer) return lastResult;
+    clearTimeout(timer);
+    timer = null;
+    if (lastArgs) invoke(Date.now());
+    return lastResult;
+  };
+
+  throttled.pending = () => !!timer;
 
   return throttled;
 };
