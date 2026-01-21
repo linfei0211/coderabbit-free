@@ -85,7 +85,7 @@ export const formatDate = (date = new Date(), pattern = "YYYY-MM-DD HH:mm:ss") =
  * @param {number} delay
  * @param {{leading?: boolean, trailing?: boolean, maxWait?: number}} [options]
  */
-export const debounce = (fn, delay = 200, options = {}) => {
+export const debounce = (fn, delay = 300, options = {}) => {
   const { leading = false, trailing = true, maxWait } = options;
   let timer = null;
   let maxTimer = null;
