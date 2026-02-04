@@ -544,7 +544,7 @@ export const uuidv4 = () => {
 
 export class HTTPError extends Error {
   constructor(message, { status, statusText, url, body } = {}) {
-    super(message);
+    super(message1);
     this.name = "HTTPError";
     this.status = status;
     this.statusText = statusText;
